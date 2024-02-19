@@ -1,0 +1,117 @@
+import numpy as np
+import pandas as pd
+
+
+def pine_rma(series, length):
+    alpha = 1 / length
+    rma = np.zeros_like(series)
+    rma[:length] = series[:length].mean()  # Start with SMA for the first 'length' values
+
+    for i in range(length, len(series)):
+        rma[i] = alpha * series[i] + (1 - alpha) * rma[i - 1]
+
+    return pd.Series(rma, index=series.index)
+
+
+def true_range(df):
+    high_low = df['High'] - df['Low']
+    high_close_prev = np.abs(df['High'] - df['Close'].shift())
+    low_close_prev = np.abs(df['Low'] - df['Close'].shift())
+    tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
+    return tr
+
+
+def atr(df, length):
+    tr = true_range(df)
+    return pine_rma(tr, length)
+
+
+def strategy(df, atr_length, multiplier):
+    # Ensure 'datetime' is set as index
+    if df.index.name != 'datetime':
+        df.set_index('Open time', inplace=True)
+
+    df['atr'] = atr(df, atr_length) * multiplier  # Calculate the ATR value directly
+
+    # Initialize Renko variables
+    renko_close = df['Close'].iloc[0]
+    renko_open = df['Close'].iloc[0]
+    direction = 0
+    last_signal = None
+    entry_price = None
+    trade_returns = []
+
+    # Pre-calculate the close prices and ATR values for performance
+    close_prices = df['Close'].values
+    atr_values = df['atr'].values
+
+    for i in range((atr_length - 1), len(df)):
+        brick_formed = 0
+        atr_value = atr_values[i]
+        close_price = close_prices[i]
+        while True:
+            if direction == 1:  # Positive direction
+                if close_price > renko_close + atr_value:
+                    renko_open = renko_close
+                    renko_close += atr_value
+                    brick_formed += 1
+                elif close_price < renko_open - atr_value:
+                    direction = -1  # Switch direction
+                    renko_open = renko_open
+                    renko_close = renko_open - atr_value
+                    brick_formed -= 1
+                else:
+                    break
+            elif direction == -1:  # Negative direction
+                if close_price < renko_close - atr_value:
+                    renko_open = renko_close
+                    renko_close -= atr_value
+                    brick_formed -= 1
+                elif close_price > renko_open + atr_value:
+                    direction = 1  # Switch direction
+                    renko_open = renko_open
+                    renko_close = renko_open + atr_value
+                    brick_formed += 1
+                else:
+                    break
+            else:  # No direction yet
+                if close_price > renko_close + atr_value:
+                    direction = 1
+                    renko_open = renko_close
+                    renko_close += atr_value
+                    brick_formed += 1
+                elif close_price < renko_close - atr_value:
+                    direction = -1
+                    renko_open = renko_close
+                    renko_close -= atr_value
+                    brick_formed -= 1
+                else:
+                    break
+
+
+        # Trading signals logic
+        if direction == 1 and last_signal != 'Long':
+            entry_price = close_prices[i]
+            print(entry_price)
+            last_signal = 'Long'
+        elif direction == -1 and last_signal == 'Long':
+            exit_price = close_prices[i]
+            print(exit_price)
+            trade_return = ((exit_price - entry_price) / entry_price) * 100
+            trade_returns.append(trade_return)
+            last_signal = 'Close Long'
+
+    # If there is an open position at the end, close it
+    if last_signal == 'Long':
+        exit_price = close_prices[-1]
+        trade_return = ((exit_price - entry_price) / entry_price) * 100
+        trade_returns.append(trade_return)
+
+    return trade_returns
+
+
+df = pd.read_csv('1000SHIBUSDT_5m.csv')
+
+returns = strategy(df, 14, 5)
+
+print(returns)
