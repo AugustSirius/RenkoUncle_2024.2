@@ -1,0 +1,176 @@
+import os
+import pandas as pd
+import plotly.graph_objects as go
+
+import pandas as pd
+import numpy as np
+import pandas as pd
+import numpy as np
+
+def pine_rma(series, length):
+    alpha = 1 / length
+    rma = np.zeros_like(series)
+    rma[:length] = series[:length].mean()  # Start with SMA for the first 'length' values
+
+    for i in range(length, len(series)):
+        rma[i] = alpha * series[i] + (1 - alpha) * rma[i - 1]
+
+    return pd.Series(rma, index=series.index)
+
+
+def true_range(df):
+    high_low = df['high'] - df['low']
+    high_close_prev = np.abs(df['high'] - df['close'].shift())
+    low_close_prev = np.abs(df['low'] - df['close'].shift())
+    tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
+    return tr
+
+
+def atr(df, length):
+    tr = true_range(df)
+    return pine_rma(tr, length)
+
+def append_renko_data(renko_data, df, i, renko_open, renko_close, brick_formed):
+    brick_size = renko_close - renko_open
+    open = df['open'].iloc[i]
+    high = df['high'].iloc[i]
+    low = df['low'].iloc[i]
+    close = df['close'].iloc[i]
+    floor = min(renko_open, renko_close)
+
+    # Append data to renko_data
+    renko_data.append({
+        'datetime': df.index[i],
+        'High': high,
+        'Low': low,
+        'Close': close,
+        'renko_open': renko_open,
+        'renko_close': renko_close,
+        # 'new_brick': brick_formed,
+        # 'brick_size': ((brick_size) / renko_open) * 100, # 这里用的是百分制，代表这个brick宽度百分之几
+        # 'relative_open': (open - floor) / abs(brick_size), # 这里不用百分制，比如0.2就代表位于brick的20%位置
+        # 'relative_high': (high - floor) / abs(brick_size), # 这样是为了更统一度量，数值范围更统一方便训练
+        # 'relative_low': (low - floor) / abs(brick_size),
+        # 'relative_close': (close - floor) / abs(brick_size)
+    })
+
+def strategy_renko_brick(df, atr_length, multiplier):
+    # rename the columns if necessary
+    # df.columns = ['datetime', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume',
+    #                 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore']
+
+    if df.index.name != 'datetime':
+        df.set_index('datetime', inplace=True)
+
+    # ATR Calculation
+    df['atr'] = atr(df, atr_length) * multiplier
+
+    # Initialize Renko variables
+    renko_close = df['close'].iloc[0]
+    renko_open = df['close'].iloc[0]
+    direction = 0
+    renko_data = []
+
+    # Extracting close prices and ATR values
+    close_prices = df['close'].values
+    atr_values = df['atr'].values
+
+    # ===================== Finding the Start Index =======================
+    # 不然有可能在初始阶段出现 brick_size = 0,
+    # 后面'relative_open': (open - floor) / abs(brick_size)会报错
+    start_index = atr_length - 1  # Default starting index
+
+    # Finding the first index where abs(close_price - renko_close) > atr_value
+    for i in range((atr_length - 1), len(df)):
+        atr_value = atr_values[i]
+        close_price = close_prices[i]
+
+        if abs(close_price - renko_close) > atr_value:
+            start_index = i
+            break
+    # =====================================================================
+
+    for i in range(start_index, len(df)):
+        brick_formed = 0
+        atr_value = atr_values[i]
+        close_price = close_prices[i]
+        while True:
+            if direction == 1:  # Positive direction
+                if close_price> renko_close + atr_value:
+                    renko_open = renko_close
+                    renko_close += atr_value
+                    brick_formed += 1
+                elif close_price < renko_open - atr_value:
+                    direction = -1
+                    renko_open = renko_open
+                    renko_close = renko_open - atr_value
+                    brick_formed -= 1
+                else:
+                    break
+            elif direction == -1:  # Negative direction
+                if close_price < renko_close - atr_value:
+                    renko_open = renko_close
+                    renko_close -= atr_value
+                    brick_formed -= 1
+                elif close_price > renko_open + atr_value:
+                    direction = 1
+                    renko_open = renko_open
+                    renko_close = renko_open + atr_value
+                    brick_formed += 1
+                else:
+                    break
+            else:  # No direction yet
+                if close_price > renko_close + atr_value:
+                    direction = 1
+                    renko_open = renko_close
+                    renko_close += atr_value
+                    brick_formed += 1
+                elif close_price < renko_close - atr_value:
+                    direction = -1
+                    renko_open = renko_close
+                    renko_close -= atr_value
+                    brick_formed -= 1
+                else:
+                    break
+
+        append_renko_data(renko_data, df, i, renko_open, renko_close, brick_formed)
+
+    renko_df = pd.DataFrame(renko_data)
+    renko_df['datetime'] = pd.to_datetime(renko_df['datetime'])
+
+    return renko_df
+#
+# df = pd.read_csv('/home/s/PycharmProjects/EVA_02/5m_1000LUNCUSDT_combined.csv')
+# strategy_renko_brick(df, 14, 5)
+
+
+def plot_renko_data(renko_df, filename):
+    df = renko_df
+
+    # Convert 'Open Time' to datetime
+    df['Open Time'] = pd.to_datetime(df['datetime'])
+
+    # Create a Plotly figure
+    fig = go.Figure()
+
+    # Add traces for Close, Renko Open, and Renko Close
+    fig.add_trace(go.Scatter(x=df['Open Time'], y=df['Close'], mode='lines', name='Close'))
+    fig.add_trace(go.Scatter(x=df['Open Time'], y=df['renko_open'], mode='lines', name='Renko Open'))
+    fig.add_trace(go.Scatter(x=df['Open Time'], y=df['renko_close'], mode='lines', name='Renko Close'))
+
+    # Update layout for a better view with dynamic y-axis
+    fig.update_layout(
+        title=f'Close vs Renko Open/Close for {filename}',
+        xaxis_title='Open Time',
+        yaxis_title='Price',
+        hovermode="x",
+        xaxis=dict(rangeslider=dict(visible=True), type="date"),
+        yaxis=dict(fixedrange=False)
+    )
+
+    # Show the plot
+    fig.show()
+
+df = pd.read_csv('/home/s/Desktop/5m_futures_concat_transformed/5m_CHZUSDT_combined.csv')
+renko_df = strategy_renko_brick(df, atr_length=14, multiplier=6)
+plot_renko_data(renko_df, '1INCH')
