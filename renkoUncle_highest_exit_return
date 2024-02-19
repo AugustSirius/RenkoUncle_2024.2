@@ -1,0 +1,179 @@
+
+​
+Ice Sirius <iceandsirius@gmail.com>
+​
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import glob
+import os
+
+# Function to calculate a modified moving average (RMA)
+def pine_rma(series, length):
+    alpha = 1 / length
+    rma = np.zeros_like(series)
+    rma[:length] = series[:length].mean()
+    for i in range(length, len(series)):
+        rma[i] = alpha * series[i] + (1 - alpha) * rma[i - 1]
+    return pd.Series(rma, index=series.index)
+
+# Function to calculate True Range
+def true_range(df):
+    high_low = df['High'] - df['Low']
+    high_close_prev = np.abs(df['High'] - df['Close'].shift())
+    low_close_prev = np.abs(df['Low'] - df['Close'].shift())
+    tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
+    return tr
+
+# Function to calculate Average True Range (ATR)
+def atr(df, length):
+    tr = true_range(df)
+    return pine_rma(tr, length)
+
+# Main strategy function
+def strategy(df, atr_length, multiplier):
+    df.columns = ['Open time', 'Open', 'High', 'Low', 'Close', 'Volume']
+    if df.index.name != 'datetime':
+        df.set_index('Open time', inplace=True)
+    df['atr'] = atr(df, atr_length) * multiplier
+
+
+    renko_close = df['Close'].iloc[0]
+    renko_open = df['Close'].iloc[0]
+    direction = 0
+    last_signal = None
+    entry_price = None
+    entry_time = None
+    highest_price = None
+    trades_data = []
+
+    close_prices = df['Close'].values
+    atr_values = df['atr'].values
+    times = df.index
+
+    highest_overall_return = -np.inf
+    highest_return_time = None
+
+    for i in range((atr_length - 1), len(df)):
+        brick_formed = 0
+        atr_value = atr_values[i]
+        close_price = close_prices[i]
+        current_time = times[i]
+
+        while True:
+            if direction == 1:
+                if close_price > renko_close + atr_value:
+                    renko_open = renko_close
+                    renko_close += atr_value
+                    brick_formed += 1
+                elif close_price < renko_open - atr_value:
+                    direction = -1
+                    renko_open = renko_open
+                    renko_close = renko_open - atr_value
+                    brick_formed -= 1
+                else:
+                    break
+            elif direction == -1:
+                if close_price < renko_close - atr_value:
+                    renko_open = renko_close
+                    renko_close -= atr_value
+                    brick_formed -= 1
+                elif close_price > renko_open + atr_value:
+                    direction = 1
+                    renko_open = renko_open
+                    renko_close = renko_open + atr_value
+                    brick_formed += 1
+                else:
+                    break
+            else:
+                if close_price > renko_close + atr_value:
+                    direction = 1
+                    renko_open = renko_close
+                    renko_close += atr_value
+                    brick_formed += 1
+                elif close_price < renko_close - atr_value:
+                    direction = -1
+                    renko_open = renko_close
+                    renko_close -= atr_value
+                    brick_formed -= 1
+                else:
+                    break
+
+        if direction == 1 and last_signal != 'Long':
+            entry_price = close_prices[i]
+            entry_time = current_time
+            highest_price = close_prices[i]
+            last_signal = 'Long'
+        elif direction == 1 and last_signal == 'Long':
+            if close_prices[i] > highest_price:
+                highest_price = close_prices[i]
+        elif direction == -1 and last_signal == 'Long':
+            exit_price = close_prices[i]
+            exit_return = ((exit_price - entry_price) / entry_price) * 100
+            high_return = ((highest_price - entry_price) / entry_price) * 100
+            last_signal = 'Close Long'
+            trades_data.append([i, exit_return, high_return])
+            if exit_return > highest_overall_return:
+                highest_overall_return = exit_return
+                highest_return_time = current_time
+
+
+    if last_signal == 'Long':
+        exit_price = close_prices[-1]
+        exit_return = ((exit_price - entry_price) / entry_price) * 100
+        high_return = ((highest_price - entry_price) / entry_price) * 100
+        trades_data.append([len(df) - 1, exit_return, high_return])
+        if exit_return > highest_overall_return:
+            highest_overall_return = exit_return
+            highest_return_time = current_time
+
+
+    trades_data.sort(key=lambda x: x[0])
+    # trade_times, exit_returns, high_returns = zip(*trades_data)
+
+    trades_df = pd.DataFrame(trades_data, columns=['Trade Number', 'Exit Return', 'High Return'])
+    trades_df.set_index('Trade Number', inplace=True)
+
+
+    return trades_df, highest_overall_return, highest_return_time
+
+all_trades_df = pd.DataFrame(columns=['Trade Number', 'Exit Return', 'High Return'])
+# New DataFrame for filtered data
+filtered_trades_df = pd.DataFrame()
+folder_path = 'test2/*.csv'
+csv_files = glob.glob(folder_path)
+
+
+for atr_length in range(13, 15):
+    for multiplier in range(5, 7):
+        print(f"Processing ATR Length: {atr_length}, Multiplier: {multiplier}")
+        all_trades_df = pd.DataFrame(columns=['Trade Number', 'Exit Return', 'High Return'])
+
+        for file in csv_files:
+            print(f"Processing file: {file}")
+            try:
+                df = pd.read_csv(file)
+                trades_df, highest_return, return_time = strategy(df, atr_length, multiplier)
+                all_trades_df = pd.concat([all_trades_df, trades_df])
+                print(f"Highest return for {file}: {highest_return:.2f}% at time {return_time}")
+            except Exception as e:
+                print(f"Error processing {file}: {e}")
+
+        output_file = f"all_trades_atr{atr_length}_mult{multiplier}.csv"
+        all_trades_df.to_csv(output_file, index=False)
+        print(f"Saved data to {output_file}")
+
+        # Filter trades with exit_return greater than 50%
+        high_performance_trades = all_trades_df[all_trades_df['Exit Return'] > 50].copy(deep=True)
+
+        high_performance_trades['ATR Length, Multiplier'] = [(atr_length, multiplier)] * len(high_performance_trades)
+
+        # Append to the filtered trades DataFrame
+        filtered_trades_df = pd.concat([filtered_trades_df, high_performance_trades])
+
+# Sort the DataFrame first by 'ATR Length, Multiplier', then by 'Exit Return'
+filtered_trades_df.sort_values(by=['ATR Length, Multiplier', 'Exit Return'], ascending=[True, True], inplace=True)
+# Select and rearrange columns as needed
+filtered_trades_df = filtered_trades_df[['ATR Length, Multiplier', 'Exit Return', 'High Return']]
+# Saving the DataFrame to CSV
+filtered_trades_df.to_csv("filtered_trades.csv", index=False)
