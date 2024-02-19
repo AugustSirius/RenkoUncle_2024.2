@@ -1,0 +1,233 @@
+
+​
+Ice Sirius <iceandsirius@gmail.com>
+​
+import numpy as np  # Import NumPy for numerical operations
+import pandas as pd  # Import pandas for data manipulation
+import matplotlib.pyplot as plt  # Import matplotlib for plotting graphs
+import glob  # Import glob for file path handling
+import os  # Import os for operating system interactions
+
+
+# Function to calculate a modified moving average (RMA)
+def pine_rma(series, length):
+    alpha = 1 / length  # Calculate the decay factor
+    rma = np.zeros_like(series)  # Initialize RMA array with zeros
+    # Start RMA with the average of the first 'length' values
+    rma[:length] = series[:length].mean()
+    # Calculate RMA for the rest of the series
+    for i in range(length, len(series)):
+        rma[i] = alpha * series[i] + (1 - alpha) * rma[i - 1]
+    return pd.Series(rma, index=series.index)  # Return as pandas Series
+
+
+# Function to calculate True Range, a component of ATR
+def true_range(df):
+    high_low = df['High'] - df['Low']  # High minus Low
+    high_close_prev = np.abs(df['High'] - df['Close'].shift())  # High minus previous Close
+    low_close_prev = np.abs(df['Low'] - df['Close'].shift())  # Low minus previous Close
+    # Take the max of the three calculations for each row
+    tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
+    return tr
+
+
+# Function to calculate Average True Range (ATR)
+def atr(df, length):
+    tr = true_range(df)  # Calculate True Range
+    return pine_rma(tr, length)  # Apply modified moving average to True Range
+
+
+# Main strategy function
+def strategy(df, atr_length, multiplier):
+    # print("Entering strategy function.")
+    # Rename columns for clarity
+    df.columns = ['Open time', 'Open', 'High', 'Low', 'Close', 'Volume']
+
+    # Set index to datetime if it's not already set
+    if df.index.name != 'datetime':
+        df.set_index('Open time', inplace=True)
+
+    # print("Calculating ATR...")
+    # Calculate ATR and apply the multiplier
+    df['atr'] = atr(df, atr_length) * multiplier
+
+    # Initialize variables for tracking trade positions
+    renko_close = df['Close'].iloc[0]
+    renko_open = df['Close'].iloc[0]
+    direction = 0
+    last_signal = None
+    entry_price = None
+    entry_time = None
+    highest_price = None
+
+    # Prepare arrays for iteration
+    close_prices = df['Close'].values
+    atr_values = df['atr'].values
+    times = df.index
+    trades_data = []
+
+    # Iterate over each row in the DataFrame
+    for i in range((atr_length - 1), len(df)):
+        # print(f"Processing index: {i}")
+        # Skip processing for rows where Open, High, Low, and Close prices are the same
+        if df.loc[times[i], 'Open'] == df.loc[times[i], 'High'] == df.loc[times[i], 'Low'] == df.loc[times[i], 'Close']:
+            # print(f"Skipping index {i} as Open, High, Low, and Close prices are the same")
+            continue
+
+        brick_formed = 0
+        atr_value = atr_values[i]
+        close_price = close_prices[i]
+        current_time = times[i]
+
+
+        # Loop for handling the Renko-like price movement
+        while True:
+            # Logic for moving up
+            if direction == 1:
+                if close_price > renko_close + atr_value:
+                    renko_open = renko_close
+                    renko_close += atr_value
+                    brick_formed += 1
+                elif close_price < renko_open - atr_value:
+                    direction = -1
+                    renko_open = renko_open
+                    renko_close = renko_open - atr_value
+                    brick_formed -= 1
+                else:
+                    break
+            # Logic for moving down
+            elif direction == -1:
+                if close_price < renko_close - atr_value:
+                    renko_open = renko_close
+                    renko_close -= atr_value
+                    brick_formed -= 1
+                elif close_price > renko_open + atr_value:
+                    direction = 1
+                    renko_open = renko_open
+                    renko_close = renko_open + atr_value
+                    brick_formed += 1
+                else:
+                    break
+            # Initial direction setting
+            else:
+                if close_price > renko_close + atr_value:
+                    direction = 1
+                    renko_open = renko_close
+                    renko_close += atr_value
+                    brick_formed += 1
+                elif close_price < renko_close - atr_value:
+                    direction = -1
+                    renko_open = renko_close
+                    renko_close -= atr_value
+                    brick_formed -= 1
+                else:
+                    break
+
+        # print(f"Exited loop at index {i}")
+
+        # Logic for long positions and trade recording
+        if direction == 1 and last_signal != 'Long':
+            entry_price = close_prices[i]
+            entry_time = current_time
+            highest_price = close_prices[i]
+            last_signal = 'Long'
+        elif direction == 1 and last_signal == 'Long':
+            if close_prices[i] > highest_price:
+                highest_price = close_prices[i]
+        elif direction == -1 and last_signal == 'Long':
+            exit_price = close_prices[i]
+            exit_return = ((exit_price - entry_price) / entry_price) * 100
+            high_return = ((highest_price - entry_price) / entry_price) * 100
+            last_signal = 'Close Long'
+            trades_data.append([i, exit_return, high_return])
+
+    # Handle the last open trade if any
+    if last_signal == 'Long':
+        exit_price = close_prices[-1]
+        exit_return = ((exit_price - entry_price) / entry_price) * 100
+        high_return = ((highest_price - entry_price) / entry_price) * 100
+        # print(f"Last trade exit return: {exit_return}, High return: {high_return}")
+        trades_data.append([len(df) - 1, exit_return, high_return])
+
+    # print("Exiting strategy function.")
+    # Sort trades data and convert to DataFrame
+    trades_data.sort(key=lambda x: x[0])
+    trade_times, exit_returns, high_returns = zip(*trades_data)
+
+    trades_df = pd.DataFrame(trades_data, columns=['Trade Number', 'Exit Return', 'High Return'])
+    trades_df.set_index('Trade Number', inplace=True)
+    return trades_df
+
+
+# Initialize an empty DataFrame for aggregating results
+all_trades_df = pd.DataFrame(columns=['Trade Number', 'Exit Return', 'High Return'])
+
+folder_path = '/home/s/Desktop/5m_futures_concat_transformed/*.csv'  # Path to CSV files
+csv_files = glob.glob(folder_path)  # Get list of CSV files in the folder
+# print(f"Found {len(csv_files)} files to process.")
+
+# Create a directory for plots if it doesn't exist
+plots_dir = 'plots'
+if not os.path.exists(plots_dir):
+    os.makedirs(plots_dir)
+    # print("Created directory for plots.")
+
+# Iterate over a range of ATR lengths and multipliers
+for atr_length in range(1, 50):
+    for multiplier in range(1, 10):
+        print(f"Processing ATR Length: {atr_length}, Multiplier: {multiplier}")
+        all_trades_df = pd.DataFrame(columns=['Trade Number', 'Exit Return', 'High Return'])
+
+        # Process each file and apply the strategy
+        for file in csv_files:
+            print(f"Processing file: {file}")
+            try:
+                df = pd.read_csv(file)
+                # print(f"Loaded data from {file}, applying strategy...")
+                trades_df = strategy(df, atr_length, multiplier)
+                all_trades_df = pd.concat([all_trades_df, trades_df])
+                # print(f"Strategy applied to {file}.")
+            except Exception as e:
+                print(f"Error processing {file}: {e}")
+
+        output_file = f"all_trades_atr{atr_length}_mult{multiplier}.csv"
+        all_trades_df.to_csv(output_file, index=False)
+        print(f"Saved data to {output_file}")
+
+        if not all_trades_df.empty:
+            # Check for any unexpected high returns
+            print(f"Max High Return: {all_trades_df['High Return'].max()}")
+            print(f"Max Exit Return: {all_trades_df['Exit Return'].max()}")
+
+            all_trades_df.sort_values(by='Exit Return', inplace=True)
+            all_trades_df.reset_index(drop=True, inplace=True)
+
+            # Increase the figure size and resolution
+            plt.figure(figsize=(18, 9), dpi=150)
+
+            # Plotting the bars side by side instead of stacking
+            bar_width = 0.4  # width of the bars
+            index = all_trades_df.index
+
+            plt.bar(index - bar_width / 2, all_trades_df['High Return'], width=bar_width, color='green',
+                    label='High Return')
+            plt.bar(index + bar_width / 2, all_trades_df['Exit Return'], width=bar_width, color='blue',
+                    label='Exit Return')
+
+            plt.xlabel('Trade Number')
+            plt.ylabel('Return (%)')
+            title = f'Trade Returns (ATR Length: {atr_length}, Multiplier: {multiplier})'
+            plt.title(title)
+            plt.legend()
+            plt.tight_layout()
+            plt.grid(True)
+
+            # Save the plot with higher resolution
+            plot_filename = os.path.join(plots_dir, f'atr_{atr_length}_multiplier_{multiplier}.png')
+            plt.savefig(plot_filename, format='png')
+            plt.close()
+            print(f"Saved plot to {plot_filename}.")
+        else:
+            print("No trades data to plot for this combination.")
+
+print("Processing complete.")
